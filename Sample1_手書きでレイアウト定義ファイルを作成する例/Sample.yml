@@ -1,0 +1,23 @@
+MaiScr:
+	BG:
+		x:	DISP_X/2
+		y:	DISP_Y/2
+		img:	C:\usr\PIECE\HTML\IMAGE\ayakawalk.gif
+	UI:
+		x:	40
+		y:	30
+		Score:
+			x:	-10
+			y:	20
+			w:	35
+			h:	5
+		Credit:
+			x:	128 - 5*3
+			y:	 88 - 10
+			w:	5*3
+			h:	10
+SubScr:
+	BG:
+		x:	0
+		y:	0
+		img:	C:\usr\PIECE\HTML\IMAGE\piece_img1.gif
