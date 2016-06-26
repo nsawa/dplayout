@@ -34,6 +34,10 @@
  *	  │  h: 10
  *	- 本当は、別のノードのキーも参照出来るようにしたかったのですが、指定方法が複雑になりそうなのと、際限が無くなりそうなので、そこまでの対応は行いませんでした。
  *	  今後使ってみて、もし必要そうならば、機能追加を検討して下さい。
+ *	* Sun Jun 26 13:07:58 JST 2016 Naoyuki Sawa
+ *	- メモリリークの検出を無効にしました。
+ *	  当ツールにおいては、ExprExceptionを補足して継続する箇所で、メモリリークは発生します。
+ *	  ガベージコレクションを有効にしているので、動作上の問題は有りません。
  */
 #include "app.h"
 #define VERSION		"20160626"	//最終更新日
@@ -51,8 +55,8 @@ int main(int argc, char* argv[]) {
 	setlogmask(LOG_UPTO(LOG_INFO));		//リリースビルドでは、LOG_DEBUGを抑制する。
 #endif//_DEBUG
 #if     (defined(GC_H) && !defined(USE_BISON_FLEX))
-	putenv("GC_LOG_FILE=CON");//ログ出力先を指定する。
-	GC_set_find_leak(1);//メモリリーク検出を開始する。
+//	putenv("GC_LOG_FILE=CON");//ログ出力先を指定する。
+//	GC_set_find_leak(1);//メモリリーク検出を開始する。
 #endif//(defined(GC_H) && !defined(USE_BISON_FLEX))
 #ifdef  __CLIP_SEH_H__
 	SEH_init();
@@ -67,7 +71,7 @@ int main(int argc, char* argv[]) {
 	Gdiplus_Exit();
 #endif//USE_GDIPLUS
 #if     (defined(GC_H) && !defined(USE_BISON_FLEX))
-	CHECK_LEAKS();//メモリリークを検出する。	//★当ツールにおいては、ExprExceptionを補足して継続する箇所で、メモリリークは発生します。ガベージコレクションを有効にしているので、動作上の問題は有りません。★
+//	CHECK_LEAKS();//メモリリークを検出する。	//★当ツールにおいては、ExprExceptionを補足して継続する箇所で、メモリリークは発生します。ガベージコレクションを有効にしているので、動作上の問題は有りません。★
 #endif//(defined(GC_H) && !defined(USE_BISON_FLEX))
 	return exitCode;
 }
