@@ -18,9 +18,25 @@
  *	* Sat Jun 25 21:55:36 JST 2016 Naoyuki Sawa
  *	- 計算式の処理を、これまではShuntingYard_Eval()を使用していましたが、expreval()を使用するように変更しました。
  *	- '-D'オプションを追加しました。
+ *	* Sun Jun 26 12:14:12 JST 2016 Naoyuki Sawa
+ *	- "x","y","w","h"キーの式の中で、同一ノードの、他のキーの値を参照出来るようにしました。
+ *	  <例>
+ *	  │Foo:
+ *	  │  x: y + 1
+ *	  │  y: w + 1
+ *	  │  w: h + 1
+ *	  │  h: 10
+ *	  <例>
+ *	  │Bar:
+ *	  │  x: (DISP_X - 10) - w
+ *	  │  y: (DISP_Y - 10) - h
+ *	  │  img: C:\usr\PIECE\HTML\IMAGE\piece_img1.gif
+ *	  │  h: 10
+ *	- 本当は、別のノードのキーも参照出来るようにしたかったのですが、指定方法が複雑になりそうなのと、際限が無くなりそうなので、そこまでの対応は行いませんでした。
+ *	  今後使ってみて、もし必要そうならば、機能追加を検討して下さい。
  */
 #include "app.h"
-#define VERSION		"20160625"	//最終更新日
+#define VERSION		"20160626"	//最終更新日
 /****************************************************************************
  *	main
  ****************************************************************************/
@@ -51,7 +67,7 @@ int main(int argc, char* argv[]) {
 	Gdiplus_Exit();
 #endif//USE_GDIPLUS
 #if     (defined(GC_H) && !defined(USE_BISON_FLEX))
-	CHECK_LEAKS();//メモリリークを検出する。
+	CHECK_LEAKS();//メモリリークを検出する。	//★当ツールにおいては、ExprExceptionを補足して継続する箇所で、メモリリークは発生します。ガベージコレクションを有効にしているので、動作上の問題は有りません。★
 #endif//(defined(GC_H) && !defined(USE_BISON_FLEX))
 	return exitCode;
 }
@@ -101,22 +117,37 @@ void app_exit() {
 //}}アプリケーション特有の処理
 }
 /*--------------------------------------------------------------------------*/
-static double fnGetVar(const char* name) {
-	double* pd = (double*)g_dataset_get_data(fnGetVar, name);
+static double fnGetVar_global(const char* name) {
+	double* pd = (double*)g_dataset_get_data(fnGetVar_global, name);
 	if(pd) { return *pd; }
-//削除	//'-v'オプションが指定されていたら…	⇒このメッセージは、'-v'オプションが指定されていなくても、常に表示する事にした。
-//削除	if(opt_v) {
-		fprintf(stderr, "未定義の変数'%s'が参照されました。\n", name);
-//削除	}
 	SEH_throw(ExprException);
 }
 /*--------------------------------------------------------------------------*/
-static void process_node(FILE* fp, const char* fname, yaml_document_t* d, yaml_mapping_t* m, char** v, int x0, int y0) {
-	int x = 0, x_valid = 0;		//"x"キーを見つけたら、xに値を格納して、x_validを1にセットする。
-	int y = 0, y_valid = 0;		//"y"キーを見つけたら、yに値を格納して、y_validを1にセットする。
-	int w = 0, w_valid = 0;		//"w"キーを見つけたら、wに値を格納して、w_validを1にセットする。
-	int h = 0, h_valid = 0;		//"h"キーを見つけたら、hに値を格納して、h_validを1にセットする。
+typedef struct _ST_LocalVar {
+	unsigned	x_valid :1;	//xに値を格納したら、x_validに1をセットする。
+	unsigned	y_valid :1;	//yに値を格納したら、y_validに1をセットする。
+	unsigned	w_valid :1;	//wに値を格納したら、w_validに1をセットする。
+	unsigned	h_valid :1;	//hに値を格納したら、h_validに1をセットする。
+	double		x, y, w, h;
+} ST_LocalVar;
+/*- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - */
+static double fnGetVar_local(const char* name, void* arg) {
+	ST_LocalVar* pLocalVar = (ST_LocalVar*)arg;
+	if(!strcmp(name, "x") && pLocalVar->x_valid) { return pLocalVar->x; }
+	if(!strcmp(name, "y") && pLocalVar->y_valid) { return pLocalVar->y; }
+	if(!strcmp(name, "w") && pLocalVar->w_valid) { return pLocalVar->w; }
+	if(!strcmp(name, "h") && pLocalVar->h_valid) { return pLocalVar->h; }
+	return fnGetVar_global(name);
+}
+/*--------------------------------------------------------------------------*/
+static void process_node(FILE* fp, const char* fname, yaml_document_t* d, yaml_mapping_t* m, char** v, double x0, double y0) {
+	const char* x_str = NULL;	//"x"キーを見つけたら、x_strに文字列を格納する。
+	const char* y_str = NULL;	//"y"キーを見つけたら、y_strに文字列を格納する。
+	const char* w_str = NULL;	//"w"キーを見つけたら、w_strに文字列を格納する。
+	const char* h_str = NULL;	//"h"キーを見つけたら、h_strに文字列を格納する。
 	const char* img = NULL;		//"img"キーを見つけたら、imgに文字列を格納する。
+	char w_buf[16], h_buf[16];	//画像から"w","h"キーの値を取得した場合に、文字列化するために使用する。
+	ST_LocalVar localVar = { 0 };
 	//エラーメッセージを表示する時のために、"."で連結したパス名を作成しておく。
 	char* err_path = strjoinv(".", v);
 	//子階層のキーの名前を記憶しておくための、ポインタ配列を作成する。
@@ -137,59 +168,35 @@ static void process_node(FILE* fp, const char* fname, yaml_document_t* d, yaml_m
 				//キーの名前が"x"ならば…
 				if(!strcmp(k, "x")) {
 					//"x"キーが重複していない事を確認する。
-					if(x_valid) {
+					if(x_str) {
 						error(EXIT_FAILURE, 0, "%s %s.%s キーが重複しています。", fname, err_path, k);
 					}
-					//"x"キーの値を取得する。
-					SEH_try {
-						x = expreval(yaml_node_get_string(n), fnGetVar, NULL);
-					} SEH_catch(ExprException) {
-						error(EXIT_FAILURE, 0, "%s %s.%s キーの値が不正です。", fname, err_path, k);
-					} SEH_end
-					//"x"キーの値を取得した事をマークする。
-					x_valid = 1;
+					//"x"キーの文字列を取得する。
+					x_str = yaml_node_get_string(n);
 				//キーの名前が"y"ならば…
 				} else if(!strcmp(k, "y")) {
 					//"y"キーが重複していない事を確認する。
-					if(y_valid) {
+					if(y_str) {
 						error(EXIT_FAILURE, 0, "%s %s.%s キーが重複しています。", fname, err_path, k);
 					}
-					//"y"キーの値を取得する。
-					SEH_try {
-						y = expreval(yaml_node_get_string(n), fnGetVar, NULL);
-					} SEH_catch(ExprException) {
-						error(EXIT_FAILURE, 0, "%s %s.%s キーの値が不正です。", fname, err_path, k);
-					} SEH_end
-					//"y"キーの値を取得した事をマークする。
-					y_valid = 1;
+					//"y"キーの文字列を取得する。
+					y_str = yaml_node_get_string(n);
 				//キーの名前が"w"ならば…
 				} else if(!strcmp(k, "w")) {
 					//"w"キーが重複していない事を確認する。
-					if(w_valid) {
+					if(w_str) {
 						error(EXIT_FAILURE, 0, "%s %s.%s キーが重複しています。", fname, err_path, k);
 					}
-					//"w"キーの値を取得する。
-					SEH_try {
-						w = expreval(yaml_node_get_string(n), fnGetVar, NULL);
-					} SEH_catch(ExprException) {
-						error(EXIT_FAILURE, 0, "%s %s.%s キーの値が不正です。", fname, err_path, k);
-					} SEH_end
-					//"w"キーの値を取得した事をマークする。
-					w_valid = 1;
+					//"w"キーの文字列を取得する。
+					w_str = yaml_node_get_string(n);
 				//キーの名前が"h"ならば…
 				} else if(!strcmp(k, "h")) {
 					//"h"キーが重複していない事を確認する。
-					if(h_valid) {
+					if(h_str) {
 						error(EXIT_FAILURE, 0, "%s %s.%s キーが重複しています。", fname, err_path, k);
 					}
-					//"h"キーの値を取得する。
-					SEH_try {
-						h = expreval(yaml_node_get_string(n), fnGetVar, NULL);
-					} SEH_catch(ExprException) {
-						error(EXIT_FAILURE, 0, "%s %s.%s キーの値が不正です。", fname, err_path, k);
-					} SEH_end
-					//"h"キーの値を取得した事をマークする。
-					h_valid = 1;
+					//"h"キーの文字列を取得する。
+					h_str = yaml_node_get_string(n);
 				//キーの名前が"img"ならば…
 				} else if(!strcmp(k, "img")) {
 					//"img"キーが重複していない事を確認する。
@@ -220,7 +227,7 @@ static void process_node(FILE* fp, const char* fname, yaml_document_t* d, yaml_m
 		}
 	}
 	//画像ファイル名が指定されており、かつ、"w","h"キーの一方でも指定されていなければ、画像から取得を試みる。
-	if(img && (!w_valid || !h_valid)) {
+	if(img && (!w_str || !h_str)) {
 		//画像ファイル名を、Unicode文字列に変換する。
 		wchar_t* uni = strdup_ShiftJisToUnicode(img);
 		//画像を読み込む。
@@ -228,11 +235,10 @@ static void process_node(FILE* fp, const char* fname, yaml_document_t* d, yaml_m
 		//画像が読み込めたら…
 		if(!image->GetLastStatus()) {
 			//"w"キーが指定されていなければ…
-			if(!w_valid) {
+			if(!w_str) {
 				//画像から、"w"キーの値を取得する。
-				w = image->GetWidth();
-				//"w"キーの値を取得した事をマークする。
-				w_valid = 1;
+				snprintf(w_buf, sizeof w_buf, "%d", image->GetWidth());
+				w_str = w_buf;
 				//'-v'オプションが指定されていたら…
 				if(opt_v) {
 					//"w"キーの値を、画像から取得した事を表示する。
@@ -240,11 +246,10 @@ static void process_node(FILE* fp, const char* fname, yaml_document_t* d, yaml_m
 				}
 			}
 			//"h"キーが指定されていなければ…
-			if(!h_valid) {
+			if(!h_str) {
 				//画像から、"h"キーの値を取得する。
-				h = image->GetHeight();
-				//"h"キーの値を取得した事をマークする。
-				h_valid = 1;
+				snprintf(h_buf, sizeof h_buf, "%d", image->GetHeight());
+				h_str = h_buf;
 				//'-v'オプションが指定されていたら…
 				if(opt_v) {
 					//"h"キーの値を、画像から取得した事を表示する。
@@ -265,17 +270,69 @@ static void process_node(FILE* fp, const char* fname, yaml_document_t* d, yaml_m
 		free(uni);
 	}
 	//"x","y","w","h"キーの内、一つでも指定させていたら…
-	if(x_valid || y_valid || w_valid || h_valid) {
+	if(x_str || y_str || w_str || h_str) {
 		//ルートノードでなければ…
 		if(v[0]) {
+			for(;;) {
+				int nSuccess = 0;		//式を評価出来たら、この変数を増やす。
+				const char* pFailure = NULL;	//式を評価エラーが発生したら、最初にエラーが発生したキーの名前を格納する。
+				//"x"キーの文字列が有り、まだ有効でなければ、式を評価してみる。
+				if(x_str && !localVar.x_valid) {
+					SEH_try {
+						localVar.x = expreval_r(x_str, fnGetVar_local, NULL, &localVar);
+						localVar.x_valid = 1;
+						nSuccess++;
+					} SEH_catch(ExprException) {
+						if(!pFailure) { pFailure = "x"; }
+					} SEH_end
+				}
+				//"y"キーの文字列が有り、まだ有効でなければ、式を評価してみる。
+				if(y_str && !localVar.y_valid) {
+					SEH_try {
+						localVar.y = expreval_r(y_str, fnGetVar_local, NULL, &localVar);
+						localVar.y_valid = 1;
+						nSuccess++;
+					} SEH_catch(ExprException) {
+						if(!pFailure) { pFailure = "y"; }
+					} SEH_end
+				}
+				//"w"キーの文字列が有り、まだ有効でなければ、式を評価してみる。
+				if(w_str && !localVar.w_valid) {
+					SEH_try {
+						localVar.w = expreval_r(w_str, fnGetVar_local, NULL, &localVar);
+						localVar.w_valid = 1;
+						nSuccess++;
+					} SEH_catch(ExprException) {
+						if(!pFailure) { pFailure = "w"; }
+					} SEH_end
+				}
+				//"h"キーの文字列が有り、まだ有効でなければ、式を評価してみる。
+				if(h_str && !localVar.h_valid) {
+					SEH_try {
+						localVar.h = expreval_r(h_str, fnGetVar_local, NULL, &localVar);
+						localVar.h_valid = 1;
+						nSuccess++;
+					} SEH_catch(ExprException) {
+						if(!pFailure) { pFailure = "h"; }
+					} SEH_end
+				}
+				//一つも失敗しなければ、ループを抜ける。
+				if(!pFailure) { break; }
+				//一つでも失敗したら、ループを継続する。
+				//ただし、一つも成功していなければ、エラー終了する。
+				//具体的には、ローカル変数の相互参照が存在する,又は,未定義のグローバル変数が参照されている場合に、ここでエラー停止する。
+				if(!nSuccess) {
+					error(EXIT_FAILURE, 0, "%s %s.%s キーの値が不正です。", fname, err_path, pFailure);
+				}
+			}
 			//シンボル定義のための、"__"で連結したパスを作成する。
 			char* def_path = strjoinv("__", v);
 			//シンボル定義を出力する。
 			fprintf(fp, "//%s\n", err_path/*コメントに出力するパスは、"__"区切りよりも"."区切りの方が見易いと思ったので、def_pathではなくerr_pathを使う事にした。*/);
-			if(x_valid) { fprintf(fp, "#define X__%s\t%d\n", def_path, x + x0); }
-			if(y_valid) { fprintf(fp, "#define Y__%s\t%d\n", def_path, y + y0); }
-			if(w_valid) { fprintf(fp, "#define W__%s\t%d\n", def_path, w); }
-			if(h_valid) { fprintf(fp, "#define H__%s\t%d\n", def_path, h); }
+			if(x_str) { fprintf(fp, "#define X__%s\t%d\n", def_path, lround(localVar.x + x0)); }	//'+x0'を忘れないように!!
+			if(y_str) { fprintf(fp, "#define Y__%s\t%d\n", def_path, lround(localVar.y + y0)); }	//'+y0'を忘れないように!!
+			if(w_str) { fprintf(fp, "#define W__%s\t%d\n", def_path, lround(localVar.w)); }
+			if(h_str) { fprintf(fp, "#define H__%s\t%d\n", def_path, lround(localVar.h)); }
 			//"__"で連結したパスを解放する。
 			free(def_path);
 		//ルートノードならば…
@@ -293,7 +350,7 @@ static void process_node(FILE* fp, const char* fname, yaml_document_t* d, yaml_m
 		//パスの末尾にこのキーの名前を追加した、一時的なリストを作成する。
 		char** v2 = strv_append(v, k);
 		//再帰処理を行う。
-		process_node(fp, fname, d, yaml_node_get_mapping(n), v2, x + x0, y + y0);	//もし(!x_valid)ならば(x==0)なので、x_validを検査せずに加算して大丈夫です。y_validとyについても同様です。
+		process_node(fp, fname, d, yaml_node_get_mapping(n), v2, localVar.x + x0, localVar.y + y0);	//もし(!x_str)ならば(x==0)なので、x_strを検査せずに加算して大丈夫です。y_strとyについても同様です。
 		//一時的なリストを解放する。
 		strv_free(v2);
 	}
@@ -320,7 +377,7 @@ int app_main(int argc, char* argv[]) {
 					if(!pd) { DIE(); }				//メモリを確保出来なければエラー。
 					*pd = strtod(value, &value);			//valueの数値を取得する。
 					if(*value) { usage(); }				//数値が不正ならばエラー。
-					g_dataset_set_data(fnGetVar, name, pd);		//数値をデータセットに登録する。
+					g_dataset_set_data(fnGetVar_global, name, pd);	//数値をデータセットに登録する。
 				} while(optarg);
 				break;
 			case 'o':
@@ -368,7 +425,7 @@ int app_main(int argc, char* argv[]) {
 			//空のパスリストを作成する。
 			v = strv_new(NULL);
 			//再帰処理を行う。
-			process_node(fp, fname, d, m, v, 0, 0);
+			process_node(fp, fname, d, m, v, 0.0, 0.0);
 			//空のパスリストを解放する。
 			strv_free(v);
 			//YAMLドキュメントを解放する。

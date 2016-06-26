@@ -1,7 +1,7 @@
 MaiScr:
 	BG:
-		x:	DISP_X/2
-		y:	DISP_Y/2
+		x:	DISP_X - w / 2
+		y:	DISP_Y - h / 2
 		img:	C:\usr\PIECE\HTML\IMAGE\ayakawalk.gif
 	UI:
 		x:	40
@@ -12,12 +12,17 @@ MaiScr:
 			w:	35
 			h:	5
 		Credit:
-			x:	128 - 5*3
-			y:	 88 - 10
+			x:	DISP_X*0.2 - 5*3
+			y:	DISP_Y*0.1 - 10
 			w:	5*3
 			h:	10
+
 SubScr:
 	BG:
 		x:	0
 		y:	0
 		img:	C:\usr\PIECE\HTML\IMAGE\piece_img1.gif
+
+#//Foo:
+#//	x: w + 1	#//┬これは相互参照でエラーになります。
+#//	w: x - 1	#//┘
